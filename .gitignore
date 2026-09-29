@@ -1,0 +1,19 @@
+# Dependencies & Build files
+node_modules/
+dist/
+build/
+
+# Python Virtual Environments & Cache
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Local Environment Variables (Never commit keys)
+.env
+.env.local
+.env.production
+
+# Local SQLite Databases
+*.db
+*.sqlite3
