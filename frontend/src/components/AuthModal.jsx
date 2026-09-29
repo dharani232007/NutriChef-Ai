@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { X, Lock, Mail, User, ShieldCheck, ArrowLeft, Sparkles, AlertTriangle } from 'lucide-react';
 import { GoogleLogin } from '@react-oauth/google';
 
@@ -17,6 +17,30 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess }) {
   const [error, setError] = useState(null);
   const [successMsg, setSuccessMsg] = useState(null);
 
+  // Helper to completely clear all sensitive user inputs and messages
+  const resetFormState = () => {
+    setUsername('');
+    setEmail('');
+    setPassword('');
+    setOtpCode('');
+    setError(null);
+    setSuccessMsg(null);
+    setLoading(false);
+    setStep('credentials');
+  };
+
+  // Reset inputs whenever the modal opens or closes
+  useEffect(() => {
+    if (isOpen) {
+      resetFormState();
+    }
+  }, [isOpen]);
+
+  const handleClose = () => {
+    resetFormState();
+    onClose();
+  };
+
   if (!isOpen) return null;
 
   // Handle standard registration & login submissions
@@ -33,7 +57,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess }) {
       localStorage.setItem('rasoi_username', finalUser);
       setLoading(false);
       onAuthSuccess(finalUser, true);
-      onClose();
+      handleClose();
     } else {
       // Sign Up Flow: Send OTP to real email via Backend
       const cleanUser = (username.trim() || email.split('@')[0] || 'chef_user').toLowerCase();
@@ -86,7 +110,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess }) {
         localStorage.setItem('NutriChef_username', verifiedUser);
         localStorage.setItem('rasoi_username', verifiedUser);
         onAuthSuccess(verifiedUser, false);
-        onClose();
+        handleClose();
       } else {
         setError(data.detail || 'Invalid or expired verification code.');
       }
@@ -114,7 +138,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess }) {
         localStorage.setItem('NutriChef_username', googleUser);
         localStorage.setItem('rasoi_username', googleUser);
         onAuthSuccess(googleUser, true);
-        onClose();
+        handleClose();
       } else {
         setError(data.detail || 'Google sign-in validation failed on server.');
       }
@@ -129,7 +153,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess }) {
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/50 backdrop-blur-sm animate-in fade-in">
       <div className="bg-[#fcfaf5] rounded-3xl p-8 w-full max-w-md border border-[#4d6b53]/20 shadow-2xl relative text-stone-800">
         <button 
-          onClick={onClose}
+          onClick={handleClose}
           className="absolute top-5 right-5 text-stone-400 hover:text-stone-700 transition-colors cursor-pointer"
         >
           <X className="w-5 h-5" />
@@ -179,7 +203,10 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess }) {
             <div className="flex rounded-xl bg-stone-200/60 p-1 mb-6">
               <button
                 type="button"
-                onClick={() => { setIsLogin(true); setError(null); }}
+                onClick={() => { 
+                  setIsLogin(true); 
+                  resetFormState();
+                }}
                 className={`flex-1 py-2 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
                   isLogin ? 'bg-white text-[#2a3c2e] shadow-sm font-bold' : 'text-stone-500 hover:text-stone-800'
                 }`}
@@ -188,7 +215,11 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess }) {
               </button>
               <button
                 type="button"
-                onClick={() => { setIsLogin(false); setError(null); }}
+                onClick={() => { 
+                  setIsLogin(false); 
+                  resetFormState();
+                  setIsLogin(false);
+                }}
                 className={`flex-1 py-2 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
                   !isLogin ? 'bg-white text-[#2a3c2e] shadow-sm font-bold' : 'text-stone-500 hover:text-stone-800'
                 }`}
@@ -197,7 +228,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess }) {
               </button>
             </div>
 
-            <form onSubmit={handleSubmit} className="space-y-4">
+            <form onSubmit={handleSubmit} className="space-y-4" autoComplete="off">
               {!isLogin && (
                 <div>
                   <label className="block text-xs font-medium text-stone-600 mb-1">Your Name / Username</label>
@@ -207,6 +238,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess }) {
                       type="text"
                       required
                       value={username}
+                      autoComplete="off"
                       onChange={(e) => setUsername(e.target.value)}
                       placeholder="e.g. Priya Sharma"
                       className="w-full bg-white border border-stone-300 rounded-xl pl-9 pr-4 py-2.5 text-sm text-stone-800 placeholder-stone-400 focus:outline-none focus:border-[#4d6b53]"
@@ -223,6 +255,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess }) {
                     type="email"
                     required
                     value={email}
+                    autoComplete="off"
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="name@example.com"
                     className="w-full bg-white border border-stone-300 rounded-xl pl-9 pr-4 py-2.5 text-sm text-stone-800 placeholder-stone-400 focus:outline-none focus:border-[#4d6b53]"
@@ -238,6 +271,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess }) {
                     type="password"
                     required
                     value={password}
+                    autoComplete="new-password"
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="••••••••"
                     className="w-full bg-white border border-stone-300 rounded-xl pl-9 pr-4 py-2.5 text-sm text-stone-800 placeholder-stone-400 focus:outline-none focus:border-[#4d6b53]"
@@ -275,7 +309,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess }) {
           </>
         ) : (
           /* Step 2: 6-Digit OTP Verification Form */
-          <form onSubmit={handleVerifyOtp} className="space-y-4 animate-in fade-in">
+          <form onSubmit={handleVerifyOtp} className="space-y-4 animate-in fade-in" autoComplete="off">
             <div>
               <label className="block text-xs font-semibold text-stone-600 mb-1 text-center">
                 Enter 6-Digit Verification Code
@@ -285,6 +319,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess }) {
                 required
                 maxLength="6"
                 autoFocus
+                autoComplete="one-time-code"
                 value={otpCode}
                 onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ''))}
                 placeholder="123456"
