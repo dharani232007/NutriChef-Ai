@@ -238,42 +238,44 @@ export default function SimpleRecipeTab({ username, userProfile }) {
       const reader = response.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let accumulated = '';
+      let buffer = '';
 
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
 
-        const chunkStr = decoder.decode(value, { stream: true });
-        const lines = chunkStr.split('\n');
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || '';
 
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const dataStr = line.replace('data: ', '').trim();
-            if (!dataStr) continue;
+        for (const block of lines) {
+          const match = block.match(/data:\s*(.+)/s);
+          if (!match) continue;
+          const dataStr = match[1].trim();
+          if (!dataStr) continue;
 
-            try {
-              const eventData = JSON.parse(dataStr);
-              if (eventData.type === 'chunk') {
-                accumulated += eventData.text;
-                setStreamingText(accumulated);
-              } else if (eventData.type === 'complete') {
-                const finalRecipe = eventData.data;
-                setRecipe(finalRecipe);
-                setStreamingText('');
+          try {
+            const eventData = JSON.parse(dataStr);
+            if (eventData.type === 'chunk') {
+              accumulated += eventData.text;
+              setStreamingText(accumulated);
+            } else if (eventData.type === 'complete') {
+              const finalRecipe = eventData.data;
+              setRecipe(finalRecipe);
+              setStreamingText('');
 
-                saveToFeatureHistory(
-                  'text-recipe',
-                  finalRecipe.recipe_title || 'Pantry Recipe',
-                  ingredients.join(', '),
-                  finalRecipe,
-                  activeUser
-                );
-              } else if (eventData.type === 'error') {
-                setError(eventData.message);
-              }
-            } catch {
-              // Partial stream ticks
+              saveToFeatureHistory(
+                'text-recipe',
+                finalRecipe.recipe_title || 'Pantry Recipe',
+                ingredients.join(', '),
+                finalRecipe,
+                activeUser
+              );
+            } else if (eventData.type === 'error') {
+              setError(eventData.message);
             }
+          } catch (e) {
+            console.warn("Chunk parsing error:", e);
           }
         }
       }

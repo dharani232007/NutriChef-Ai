@@ -2,6 +2,7 @@ import os
 import json
 import time
 import ssl
+import re
 from typing import Optional
 from dotenv import load_dotenv
 from google import genai
@@ -29,7 +30,6 @@ for k in raw_keys:
 if not API_KEYS:
     raise RuntimeError("No valid Gemini API keys found! Please set GEMINI_API_KEY_1 or GEMINI_API_KEY in your .env file.")
 
-# Track active key index
 current_key_index = 0
 
 def get_client():
@@ -45,14 +45,14 @@ def switch_to_next_key() -> bool:
         return True
     return False
 
-# Base production text/multimodal models (Prioritizing pure text/JSON generation)
+# Base production text/multimodal models
 DEFAULT_MODELS = [
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
     "gemini-2.5-pro",
-    "gemini-1.5-flash-latest"
+    "gemini-1.5-flash"
 ]
 
 FALLBACK_MODELS = DEFAULT_MODELS
@@ -61,8 +61,8 @@ _discovered_models = []
 
 def get_working_models():
     """
-    Auto-discovers valid text/JSON generation models supported by the active key.
-    Strictly filters out TTS, audio-only, embedding, and image generation models.
+    Auto-discovers valid text/JSON generation models supported by active key.
+    Filters out TTS, audio-only, embedding, and image generation models.
     """
     global _discovered_models
     if _discovered_models:
@@ -75,7 +75,6 @@ def get_working_models():
             actions = getattr(m, "supported_actions", []) or getattr(m, "supported_generation_methods", [])
             clean_name = m.name.replace("models/", "").strip().lower()
 
-            # Ignore audio-only, embedding, imagegen, and realtime models
             if any(forbidden in clean_name for forbidden in ["-tts", "audio", "embedding", "imagen", "realtime", "live"]):
                 continue
 
@@ -101,10 +100,17 @@ def get_working_models():
     return _discovered_models
 
 
+def sanitize_json_text(text: str) -> str:
+    """Cleans markdown wrappers and invalid control characters that break JSON parsing."""
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    cleaned = cleaned.strip()
+    return cleaned
+
+
 def safe_gemini_call(contents, config, model: Optional[str] = None):
-    """
-    Executes generation with automatic failover across working models and backup keys.
-    """
     available_models = get_working_models()
 
     if model:
@@ -141,22 +147,19 @@ def safe_gemini_call(contents, config, model: Optional[str] = None):
                     error_str = str(e)
                     last_error = e
 
-                    # 1. 400 Incompatible modality (e.g. TTS model) or 404 Model Not Found: skip model immediately
                     if "400" in error_str or "INVALID_ARGUMENT" in error_str or "response modalities" in error_str or "404" in error_str or "NOT_FOUND" in error_str:
-                        print(f"⚠️ Model '{target_model}' not supported for text generation ({error_str[:60]}...). Trying next model...")
+                        print(f"⚠️ Model '{target_model}' not supported. Trying next model...")
                         break
 
-                    # 2. 401 Auth error: Rotate key and retry
-                    if "401" in error_str or "UNAUTHENTICATED" in error_str or "ACCESS_TOKEN_TYPE_UNSUPPORTED" in error_str:
+                    if "401" in error_str or "UNAUTHENTICATED" in error_str:
                         print(f"⚠️ Key #{current_key_index + 1} invalid (401). Rotating key...")
                         switch_to_next_key()
                         break
 
-                    # 3. 429 Quota limit / 503 Busy: Rotate key and retry[cite: 1]
                     if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "503" in error_str:
-                        print(f"⚠️ Quota/Rate limit on Key #{current_key_index + 1}. Switching to backup key...")
+                        print(f"⚠️ Quota/Rate limit on Key #{current_key_index + 1} for {target_model}. Switching key...")
                         switch_to_next_key()
-                        break
+                        continue
                     else:
                         raise e
 
@@ -174,10 +177,6 @@ def safe_gemini_call(contents, config, model: Optional[str] = None):
 
 
 def safe_gemini_stream(contents, config, model: Optional[str] = None):
-    """
-    Streams response tokens continuously using generate_content_stream.
-    Properly rotates keys and falls back through models without prematurely breaking.
-    """
     available_models = get_working_models()
 
     if model:
@@ -208,7 +207,7 @@ def safe_gemini_stream(contents, config, model: Optional[str] = None):
                     return
 
             except (ssl.SSLError, ConnectionResetError, OSError) as net_err:
-                print(f"⚠️ Streaming connection drop on {target_model}: {net_err}. Retrying...")
+                print(f"⚠️ Streaming drop on {target_model}: {net_err}. Retrying...")
                 time.sleep(1.0)
                 continue
 
@@ -216,17 +215,14 @@ def safe_gemini_stream(contents, config, model: Optional[str] = None):
                 error_str = str(e)
                 last_error = e
 
-                # 400 (Modality mismatch) or 404 (Not Found): Skip to next valid text model
                 if "400" in error_str or "INVALID_ARGUMENT" in error_str or "response modalities" in error_str or "404" in error_str or "NOT_FOUND" in error_str:
                     break
 
-                # 401: Invalid key -> rotate and continue loop
                 if "401" in error_str or "UNAUTHENTICATED" in error_str:
                     print(f"⚠️ Key #{current_key_index + 1} authentication failed. Rotating key...")
                     switch_to_next_key()
                     continue
 
-                # 429 / 503: Quota exhausted or server busy -> rotate key and continue loop
                 if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "503" in error_str:
                     print(f"⚠️ Quota exceeded on Key #{current_key_index + 1} for {target_model}. Rotating key...")
                     switch_to_next_key()
@@ -340,11 +336,8 @@ def generate_simple_recipe_from_llm(
             config=config
         )
         
-        text = response.text.strip()
-        if text.startswith("```"):
-            text = text.strip("`").removeprefix("json").strip()
-
-        raw_json_dict = json.loads(text)
+        clean_text = sanitize_json_text(response.text)
+        raw_json_dict = json.loads(clean_text, strict=False)
         validated_recipe = RecipeOutputModel(**raw_json_dict)
         return validated_recipe.model_dump()
 
@@ -442,11 +435,8 @@ def generate_personalized_recipe_from_llm(
             config=config
         )
         
-        text = response.text.strip()
-        if text.startswith("```"):
-            text = text.strip("`").removeprefix("json").strip()
-
-        raw_json_dict = json.loads(text)
+        clean_text = sanitize_json_text(response.text)
+        raw_json_dict = json.loads(clean_text, strict=False)
         validated_recipe = RecipeOutputModel(**raw_json_dict)
         return validated_recipe.model_dump()
 

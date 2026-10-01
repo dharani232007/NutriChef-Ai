@@ -1,6 +1,7 @@
 import os
 import json
 import traceback
+import re
 from typing import Optional, Literal
 from datetime import datetime, timedelta
 
@@ -56,6 +57,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+def clean_stream_json(raw_text: str) -> dict:
+    """Safely extracts and parses JSON even if it contains control characters or markdown."""
+    text = raw_text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    text = text.strip()
+    try:
+        return json.loads(text, strict=False)
+    except Exception:
+        # Fallback regex if leading/trailing garbage was received
+        match = re.search(r"(\{.*\})", text, re.DOTALL)
+        if match:
+            return json.loads(match.group(1), strict=False)
+        raise
 
 # -------------------------------------------------------------
 # Request Schemas with Input Validation
@@ -178,7 +195,6 @@ def register_user(req: RegisterRequest):
     clean_user = req.username.strip().lower()
     clean_email = req.email.strip().lower()
 
-    # Create users table if not exists
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         user_id TEXT PRIMARY KEY,
@@ -193,7 +209,6 @@ def register_user(req: RegisterRequest):
     """)
     conn.commit()
 
-    # Check if user or email already exists
     cursor.execute("SELECT user_id, is_verified FROM users WHERE email = ? OR user_id = ?", (clean_email, clean_user))
     existing = cursor.fetchone()
     
@@ -205,7 +220,6 @@ def register_user(req: RegisterRequest):
             conn.close()
             raise HTTPException(status_code=400, detail="Account with this username or email already exists.")
         else:
-            # Re-send OTP for unverified user
             cursor.execute("""
                 UPDATE users SET otp_code = ?, otp_expiry = ?, password_hash = ?
                 WHERE email = ?
@@ -224,7 +238,6 @@ def register_user(req: RegisterRequest):
         send_verification_email(clean_email, otp)
     except Exception as e:
         print(f"⚠️ Email send error: {e}")
-        # In local dev if SMTP is unconfigured, OTP still logged to terminal
         print(f"🔑 Local Verification Code for {clean_email}: {otp}")
 
     return {"success": True, "message": "Verification code sent to your email."}
@@ -385,7 +398,7 @@ def generate_recipe_endpoint(req: SimpleRecipeRequest):
 
 @app.post("/api/generate-recipe/stream")
 def generate_recipe_stream_endpoint(req: SimpleRecipeRequest):
-    """Streams recipe tokens in real-time as they are formed."""
+    """Streams recipe tokens in real-time with control character sanitization."""
     def event_generator():
         is_tamil = str(req.language or "en").strip().lower().startswith("ta")
 
@@ -405,7 +418,7 @@ def generate_recipe_stream_endpoint(req: SimpleRecipeRequest):
         RULES:
         - If items are edible, set "is_cookable": true.
         - Assume basic pantry staples are available: salt, black pepper, cooking oil, water, garlic, onions.
-        - Format the response as JSON.
+        - Format the response as JSON with single-line strings.
         {lang_instruction}
 
         OUTPUT SCHEMA:
@@ -442,10 +455,7 @@ def generate_recipe_stream_endpoint(req: SimpleRecipeRequest):
                 full_text += chunk
                 yield f"data: {json.dumps({'type': 'chunk', 'text': chunk})}\n\n"
 
-            clean_text = full_text.strip()
-            if clean_text.startswith("```"):
-                clean_text = clean_text.strip("`").removeprefix("json").strip()
-            parsed = json.loads(clean_text)
+            parsed = clean_stream_json(full_text)
             yield f"data: {json.dumps({'type': 'complete', 'data': parsed})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
@@ -512,7 +522,7 @@ def generate_personalized_recipe(request: PersonalizedRecipeRequest):
 
 @app.post("/api/generate-personalized-recipe/stream")
 def generate_personalized_recipe_stream(request: PersonalizedRecipeRequest):
-    """Streams personalized recipe output token by token."""
+    """Streams personalized recipe output token by token with clean JSON parsing."""
     def event_generator():
         clean_id = request.profile.user_id.strip().lower()
         
@@ -594,10 +604,7 @@ def generate_personalized_recipe_stream(request: PersonalizedRecipeRequest):
                 full_text += chunk
                 yield f"data: {json.dumps({'type': 'chunk', 'text': chunk})}\n\n"
 
-            clean_text = full_text.strip()
-            if clean_text.startswith("```"):
-                clean_text = clean_text.strip("`").removeprefix("json").strip()
-            parsed = json.loads(clean_text)
+            parsed = clean_stream_json(full_text)
             yield f"data: {json.dumps({'type': 'complete', 'data': parsed, 'calculated_targets': meal_targets})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
@@ -606,7 +613,7 @@ def generate_personalized_recipe_stream(request: PersonalizedRecipeRequest):
 
 
 # -------------------------------------------------------------
-# Feature 1: Fast Image-to-Recipe (One-Pass + Language-Aware Redis Cached)
+# Feature 1: Fast Image-to-Recipe
 # -------------------------------------------------------------
 @app.post("/api/image-to-recipe")
 async def image_to_recipe(
@@ -693,9 +700,9 @@ async def log_meal_from_image(
     try:
         contents = await file.read()
         profile_data = {
-            "height_cm": height_cm or 165,
-            "weight_kg": weight_kg or 65,
-            "gender": gender or "female"
+            "height_cm": height_cm,
+            "weight_kg": weight_kg,
+            "gender": gender 
         }
 
         nutrition_data = estimate_nutrition_from_image(contents, user_profile=profile_data)
@@ -764,11 +771,11 @@ def get_healthy_swaps_stream(request: SwapRequest):
             கட்டாய விதி (STRICT TAMIL SCRIPT REQUIREMENT):
             1. அனைத்து பதில்களும் தூய, எளிய தமிழ் எழுத்துக்களில் (Tamil script) மட்டுமே இருக்க வேண்டும்.
             2. ஆங்கில எழுத்துக்களோ அல்லது ஆங்கில வார்த்தைகளோ இருக்கக்கூடாது.
-            3. "original_item": பயனர் உள்ளிட்ட உணவின் தமிழ்ப் பெயர் (எ.கா: "வெள்ளை சாதம், உருளைக்கிழங்கு, சாம்பார்")
-            4. "alternative_name": ஆரோக்கியமான மாற்று உணவின் தமிழ்ப் பெயர் (எ.கா: "துருவிய காலிஃபிளவர் சாதம் (வெள்ளை சாதத்திற்கு பதில்)", "வறுத்த சர்க்கரைவள்ளிக்கிழங்கு", "பாசிப்பருப்பு காய்கறி சாம்பார்")
-            5. "calorie_difference": கலோரி சேமிப்பு தமிழில் (எ.கா: "-160 கலோரி குறைவு", "-70 கலோரி")
-            6. "why_it_is_better": ஏன் இது உடலுக்கு சிறந்தது என்பதற்கான மருத்துவ விளக்கம் தமிழில் (எ.கா: "கலோரி மற்றும் எளிய கார்போஹைட்ரேட்டுகளை வெகுவாகக் குறைத்து, இரத்த சர்க்கரை அளவைக் கட்டுப்படுத்த உதவுகிறது.")
-            7. JSON-இன் Keys மட்டுமே ஆங்கிலத்தில் இருக்க வேண்டும் ("original_item", "swaps", "alternative_name", "calorie_difference", "why_it_is_better").
+            3. "original_item": பயனர் உள்ளிட்ட உணவின் தமிழ்ப் பெயர்
+            4. "alternative_name": ஆரோக்கியமான மாற்று உணவின் தமிழ்ப் பெயர்
+            5. "calorie_difference": கலோரி சேமிப்பு தமிழில்
+            6. "why_it_is_better": ஏன் இது உடலுக்கு சிறந்தது என்பதற்கான மருத்துவ விளக்கம் தமிழில்
+            7. JSON-இன் Keys மட்டுமே ஆங்கிலத்தில் இருக்க வேண்டும்.
 
             OUTPUT SCHEMA:
             {
@@ -778,16 +785,6 @@ def get_healthy_swaps_stream(request: SwapRequest):
                   "alternative_name": "துருவிய காலிஃபிளவர் சாதம்",
                   "calorie_difference": "-160 கலோரி",
                   "why_it_is_better": "குறைந்த கார்போஹைட்ரேட் மற்றும் அதிக நார்ச்சத்து கொண்டது. உடல் எடை குறைய உதவும்."
-                },
-                {
-                  "alternative_name": "வேகவைத்த சர்க்கரைவள்ளிக்கிழங்கு",
-                  "calorie_difference": "-50 கலோரி",
-                  "why_it_is_better": "சாதாரண உருளைக்கிழங்கை விட குறைந்த கிளைசெமிக் குறியீடு மற்றும் அதிக ஊட்டச்சத்து கொண்டது."
-                },
-                {
-                  "alternative_name": "பாசிப்பருப்பு கீரை சாம்பார்",
-                  "calorie_difference": "-70 கலோரி",
-                  "why_it_is_better": "குறைந்த கொழுப்பு மற்றும் எளிதில் செரிமானமாகக்கூடிய புரதச்சத்து நிறைந்தது."
                 }
               ]
             }
@@ -822,10 +819,7 @@ def get_healthy_swaps_stream(request: SwapRequest):
                 full_text += chunk
                 yield f"data: {json.dumps({'type': 'chunk', 'text': chunk})}\n\n"
 
-            clean_text = full_text.strip()
-            if clean_text.startswith("```"):
-                clean_text = clean_text.strip("`").removeprefix("json").strip()
-            parsed = json.loads(clean_text)
+            parsed = clean_stream_json(full_text)
             yield f"data: {json.dumps({'type': 'complete', 'data': parsed})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
