@@ -32,7 +32,7 @@ export default function UserDashboard({ username, onNavigate, onOpenProfile }) {
     }
 
     // 2. Fetch live diet progress from backend
-    fetch(`http://127.0.0.1:8000/api/diet/progress/${encodeURIComponent(cleanUser)}?timeframe=today`)
+    fetch(`${API_BASE_URL}/api/diet/progress/${encodeURIComponent(activeUser)}?timeframe=${tf}`)
       .then(res => res.ok ? res.json() : null)
       .then(data => {
         if (data) setDietProgress(data);
